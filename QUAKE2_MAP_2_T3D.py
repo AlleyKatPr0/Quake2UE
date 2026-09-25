@@ -189,7 +189,9 @@ class Face:
         v1 = p2 - p1
         v2 = p3 - p1
         normal = v1.cross(v2).normalize()
-        self.normal = normal * -1.0
+        # Quake brush planes use inward-facing normals and store dist such that
+        # the inside of the brush satisfies n · x >= dist.
+        self.normal = normal
         self.dist = self.normal.dot(p1)
 
         self._calculate_texture_axes()
@@ -256,29 +258,32 @@ class Brush:
     
     def calculate_vertices(self, epsilon=0.1) -> List[Vector3]:
         vertices = []
-        
+
         if len(self.faces) < 4:
             return vertices
-        
+
         for i in range(len(self.faces)):
             for j in range(i + 1, len(self.faces)):
                 for k in range(j + 1, len(self.faces)):
                     vertex = self._intersect_three_planes(
                         self.faces[i], self.faces[j], self.faces[k]
                     )
-                    
+
                     if vertex is None or not vertex.is_valid():
                         continue
-                    
+
+                    # Quake brush planes point inward and define the brush as the
+                    # volume where n · x >= dist for every face. Keep a small
+                    # tolerance for floating-point error.
                     valid = True
                     for face in self.faces:
-                        if face.distance_to_point(vertex) > epsilon:
+                        if face.distance_to_point(vertex) < -epsilon:
                             valid = False
                             break
-                    
+
                     if not valid:
                         continue
-                    
+
                     is_duplicate = False
                     for existing in vertices:
                         if (abs(vertex.x - existing.x) < epsilon and
@@ -286,21 +291,23 @@ class Brush:
                             abs(vertex.z - existing.z) < epsilon):
                             is_duplicate = True
                             break
-                    
+
                     if not is_duplicate:
                         vertices.append(vertex)
-        
+
         return vertices
     
     def _intersect_three_planes(self, f1: Face, f2: Face, f3: Face) -> Optional[Vector3]:
         n1, n2, n3 = f1.normal, f2.normal, f3.normal
         d1, d2, d3 = f1.dist, f2.dist, f3.dist
-        
+
         denom = n1.dot(n2.cross(n3))
-        
+
         if abs(denom) < 0.0001:
             return None
-        
+
+        # Use the plane equation form: n · x = d, which the codebase stores
+        # with dist = n · p1 (positive when facing inward for Quake brushes).
         numerator = (n2.cross(n3) * d1 + n3.cross(n1) * d2 + n1.cross(n2) * d3)
         return numerator / denom
     
