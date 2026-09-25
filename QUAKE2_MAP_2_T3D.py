@@ -16,10 +16,12 @@
 import sys
 import os
 import re
+import argparse
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import math
 import logging
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -166,18 +168,74 @@ class Color:
 
 
 class Face:
-    def __init__(self, p1: Vector3, p2: Vector3, p3: Vector3, texture: str = ""):
+    def __init__(self, p1: Vector3, p2: Vector3, p3: Vector3, texture: str = "",
+                 texdef_shift: Tuple[float, float] = (0.0, 0.0),
+                 texdef_rotate: float = 0.0,
+                 texdef_scale: Tuple[float, float] = (1.0, 1.0),
+                 texdef_contents: int = 0,
+                 texdef_flags: int = 0,
+                 texdef_value: int = 0):
         self.p1 = p1
         self.p2 = p2
         self.p3 = p3
         self.texture = texture
-        
+        self.texdef_shift = texdef_shift
+        self.texdef_rotate = texdef_rotate
+        self.texdef_scale = texdef_scale
+        self.texdef_contents = texdef_contents
+        self.texdef_flags = texdef_flags
+        self.texdef_value = texdef_value
+
         v1 = p2 - p1
         v2 = p3 - p1
         normal = v1.cross(v2).normalize()
-        self.normal = normal * -1.0
+        # Quake brush planes use inward-facing normals and store dist such that
+        # the inside of the brush satisfies n · x >= dist.
+        self.normal = normal
         self.dist = self.normal.dot(p1)
-    
+
+        self._calculate_texture_axes()
+
+    def _calculate_texture_axes(self):
+        best = 0
+        bestaxis = 0
+
+        baseaxis = [
+            [0, 0, 1], [1, 0, 0], [0, -1, 0],
+            [0, 0, -1], [1, 0, 0], [0, -1, 0],
+            [1, 0, 0], [0, 1, 0], [0, 0, -1],
+            [-1, 0, 0], [0, 1, 0], [0, 0, -1],
+            [0, 1, 0], [1, 0, 0], [0, 0, -1],
+            [0, -1, 0], [1, 0, 0], [0, 0, -1]
+        ]
+
+        for i in range(6):
+            dot = self.normal.dot(Vector3(*baseaxis[i * 3]))
+            if dot > best:
+                best = dot
+                bestaxis = i
+
+        self.tex_u_axis = Vector3(*baseaxis[bestaxis * 3 + 1])
+        self.tex_v_axis = Vector3(*baseaxis[bestaxis * 3 + 2])
+
+        if self.texdef_rotate != 0:
+            ang = math.radians(self.texdef_rotate)
+            sinv = math.sin(ang)
+            cosv = math.cos(ang)
+
+            u_sv = self.tex_u_axis.x if self.tex_u_axis.x else (self.tex_u_axis.y if self.tex_u_axis.y else self.tex_u_axis.z)
+            u_tv = self.tex_v_axis.x if self.tex_v_axis.x else (self.tex_v_axis.y if self.tex_v_axis.y else self.tex_v_axis.z)
+
+            new_u = self.tex_u_axis * cosv - self.tex_v_axis * sinv
+            new_v = self.tex_u_axis * sinv + self.tex_v_axis * cosv
+            self.tex_u_axis = new_u
+            self.tex_v_axis = new_v
+
+        scale_x = self.texdef_scale[0] if self.texdef_scale[0] != 0 else 1.0
+        scale_y = self.texdef_scale[1] if self.texdef_scale[1] != 0 else 1.0
+        self.tex_u_axis = self.tex_u_axis / scale_x
+        self.tex_v_axis = self.tex_v_axis / scale_y
+
     def distance_to_point(self, point: Vector3) -> float:
         return self.normal.dot(point) - self.dist
 
@@ -200,29 +258,32 @@ class Brush:
     
     def calculate_vertices(self, epsilon=0.1) -> List[Vector3]:
         vertices = []
-        
+
         if len(self.faces) < 4:
             return vertices
-        
+
         for i in range(len(self.faces)):
             for j in range(i + 1, len(self.faces)):
                 for k in range(j + 1, len(self.faces)):
                     vertex = self._intersect_three_planes(
                         self.faces[i], self.faces[j], self.faces[k]
                     )
-                    
+
                     if vertex is None or not vertex.is_valid():
                         continue
-                    
+
+                    # Quake brush planes point inward and define the brush as the
+                    # volume where n · x >= dist for every face. Keep a small
+                    # tolerance for floating-point error.
                     valid = True
                     for face in self.faces:
-                        if face.distance_to_point(vertex) > epsilon:
+                        if face.distance_to_point(vertex) < -epsilon:
                             valid = False
                             break
-                    
+
                     if not valid:
                         continue
-                    
+
                     is_duplicate = False
                     for existing in vertices:
                         if (abs(vertex.x - existing.x) < epsilon and
@@ -230,21 +291,23 @@ class Brush:
                             abs(vertex.z - existing.z) < epsilon):
                             is_duplicate = True
                             break
-                    
+
                     if not is_duplicate:
                         vertices.append(vertex)
-        
+
         return vertices
     
     def _intersect_three_planes(self, f1: Face, f2: Face, f3: Face) -> Optional[Vector3]:
         n1, n2, n3 = f1.normal, f2.normal, f3.normal
         d1, d2, d3 = f1.dist, f2.dist, f3.dist
-        
+
         denom = n1.dot(n2.cross(n3))
-        
+
         if abs(denom) < 0.0001:
             return None
-        
+
+        # Use the plane equation form: n · x = d, which the codebase stores
+        # with dist = n · p1 (positive when facing inward for Quake brushes).
         numerator = (n2.cross(n3) * d1 + n3.cross(n1) * d2 + n1.cross(n2) * d3)
         return numerator / denom
     
@@ -444,8 +507,11 @@ class MAPParser:
         pattern = r'\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\)\s*' \
                   r'\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\)\s*' \
                   r'\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\)\s*' \
-                  r'(\S+)'
-        
+                  r'(\S+)\s+' \
+                  r'(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+' \
+                  r'(-?[\d.]+)\s+(-?[\d.]+)(?:\s+' \
+                  r'(\d+)\s+(\d+)\s+(\d+))?'
+
         match = re.match(pattern, line)
         if match:
             try:
@@ -453,11 +519,18 @@ class MAPParser:
                 p2 = Vector3(float(match.group(4)), float(match.group(5)), float(match.group(6)))
                 p3 = Vector3(float(match.group(7)), float(match.group(8)), float(match.group(9)))
                 texture = match.group(10)
-                
-                return Face(p1, p2, p3, texture)
-            except:
+                shift = (float(match.group(11)), float(match.group(12)))
+                rotate = float(match.group(13))
+                scale = (float(match.group(14)), float(match.group(15)))
+                contents = int(match.group(16)) if match.group(16) else 0
+                flags = int(match.group(17)) if match.group(17) else 0
+                value = int(match.group(18)) if match.group(18) else 0
+
+                return Face(p1, p2, p3, texture, shift, rotate, scale, contents, flags, value)
+            except Exception as e:
+                logger.warning(f"Failed to parse face line: {line[:50]}... - {e}")
                 return None
-        
+
         return None
 
 
@@ -704,11 +777,15 @@ class PolygonTriangulator:
 
 
 class T3DWriter:
-    def __init__(self, output_path: str, grid_size: float = 2.54):
+    def __init__(self, output_path: str, grid_size: float = 2.54,
+                 material_config: Optional[Dict[str, str]] = None,
+                 log_path: Optional[str] = None):
         self.output_path = output_path
         self.grid_size = grid_size
         self.triangulator = PolygonTriangulator(epsilon=grid_size / 10.0)
-        
+        self.material_config = material_config or {}
+        self.log_path = log_path
+
         self.brush_counter = 0
         self.link_counter = 0
         self.actor_counter = 0
@@ -716,7 +793,7 @@ class T3DWriter:
         self.trigger_counter = 0
         self.target_counter = 0
         self.monster_counter = 0
-        
+
         self.stats = {
             'brushes': 0,
             'polygons': 0,
@@ -728,18 +805,27 @@ class T3DWriter:
             'items': 0,
             'player_starts': 0
         }
+        self.warnings: List[str] = []
     
     def write(self, entities: List[Entity]):
+        total_entities = len(entities)
         with open(self.output_path, 'w', encoding='utf-8') as f:
             self._write_header(f)
-            
-            for entity in entities:
+
+            for idx, entity in enumerate(entities, 1):
                 try:
+                    if total_entities > 50 and idx % 50 == 0:
+                        logger.info(f"Processing entity {idx}/{total_entities}...")
                     self._write_entity(f, entity)
                 except Exception as e:
-                    logger.error(f"Error writing entity {entity.get_classname()}: {e}")
-            
+                    msg = f"Error writing entity {entity.get_classname()}: {e}"
+                    logger.error(msg)
+                    self.warnings.append(msg)
+
             self._write_footer(f)
+
+        if self.log_path:
+            self._write_log_file(self.log_path, total_entities)
     
     def _write_header(self, f):
         f.write("Begin Map\n")
@@ -1041,76 +1127,129 @@ class T3DWriter:
     def _write_polygon(self, f, polygon: Dict):
         face = polygon['face']
         vertices = polygon['vertices']
-        
+        texture = polygon.get('texture', face.texture)
+
         # CRITICAL: Must have at least 3 vertices
         if len(vertices) < 3:
             logger.warning(f"Skipping polygon with {len(vertices)} vertices")
+            self.warnings.append(f"Skipping polygon with {len(vertices)} vertices")
             return
-        
+
+        # Skip special textures
+        if texture and texture.lower() in ('null', 'skip', 'portal', 'hint', 'clip'):
+            return
+
         unreal_verts = [v.to_unreal(grid_snap=self.grid_size) for v in vertices]
-        
+
         # Validate all vertices are valid
         valid_verts = [v for v in unreal_verts if v.is_valid()]
         if len(valid_verts) < 3:
             logger.warning(f"Skipping polygon with invalid vertices")
+            self.warnings.append("Skipping polygon with invalid vertices")
             return
-        
+
         unreal_normal = face.normal.to_unreal(grid_snap=0).normalize()
-        
+
         # Validate normal
         if not unreal_normal.is_valid() or unreal_normal.length() < 0.001:
             logger.warning(f"Skipping polygon with invalid normal")
+            self.warnings.append("Skipping polygon with invalid normal")
             return
-        
+
         # Fix winding
         unreal_verts.reverse()
         unreal_normal = unreal_normal * -1.0
-        
-        # Calculate texture vectors
-        if abs(unreal_normal.z) > 0.9:
-            texture_u = Vector3(1, 0, 0)
+
+        # Use face texture axes if available, otherwise fall back to world-aligned
+        if hasattr(face, 'tex_u_axis'):
+            texture_u = face.tex_u_axis.to_unreal(grid_snap=0).normalize()
+            texture_v = face.tex_v_axis.to_unreal(grid_snap=0).normalize()
         else:
-            texture_u = Vector3(0, 0, 1).cross(unreal_normal).normalize()
-        
-        texture_v = unreal_normal.cross(texture_u).normalize()
-        
+            if abs(unreal_normal.z) > 0.9:
+                texture_u = Vector3(1, 0, 0)
+            else:
+                texture_u = Vector3(0, 0, 1).cross(unreal_normal).normalize()
+            texture_v = unreal_normal.cross(texture_u).normalize()
+
         # Triangulate
         triangles = self.triangulator.triangulate(unreal_verts, unreal_normal)
-        
+
         # CRITICAL: Skip if triangulation failed
         if not triangles:
             logger.warning(f"Triangulation failed for polygon with {len(unreal_verts)} vertices")
+            self.warnings.append(f"Triangulation failed for polygon with {len(unreal_verts)} vertices")
             return
-        
+
+        # Resolve material reference
+        material_ref = self.material_config.get(texture, '')
+
         # Write each triangle
         for tri in triangles:
             # CRITICAL: Validate triangle has exactly 3 vertices
             if len(tri) != 3:
                 logger.warning(f"Skipping invalid triangle with {len(tri)} vertices")
                 continue
-            
+
             # Validate no duplicate vertices in triangle
-            if (self.triangulator._vec_equal(tri[0], tri[1]) or 
-                self.triangulator._vec_equal(tri[1], tri[2]) or 
+            if (self.triangulator._vec_equal(tri[0], tri[1]) or
+                self.triangulator._vec_equal(tri[1], tri[2]) or
                 self.triangulator._vec_equal(tri[0], tri[2])):
                 logger.warning(f"Skipping degenerate triangle with duplicate vertices")
                 continue
-            
+
             self.link_counter += 1
             self.stats['triangles'] += 1
-            
+
             # CRITICAL: Include Link parameter (this is required by UE5!)
-            f.write(f"               Begin Polygon Link={self.link_counter}\n")
+            f.write(f"               Begin Polygon Link={self.link_counter}")
+            if material_ref:
+                f.write(f" Texture={material_ref}")
+            f.write("\n")
             f.write(f"                  Origin   {tri[0].to_t3d_string()}\n")
             f.write(f"                  Normal   {unreal_normal.to_t3d_string()}\n")
             f.write(f"                  TextureU {texture_u.to_t3d_string()}\n")
             f.write(f"                  TextureV {texture_v.to_t3d_string()}\n")
-            
+
             for vertex in tri:
-                f.write(f"                  Vertex   {vertex.to_t3d_string()}\n")
-            
+                uv = self._compute_uv(vertex, face)
+                f.write(f"                  Vertex   {vertex.to_t3d_string()}")
+                if uv is not None:
+                    f.write(f" U={uv[0]:.6f} V={uv[1]:.6f}")
+                f.write("\n")
+
             f.write(f"               End Polygon\n")
+
+    def _compute_uv(self, vertex: Vector3, face: Face) -> Optional[Tuple[float, float]]:
+        if not hasattr(face, 'tex_u_axis'):
+            return None
+
+        s = vertex.dot(face.tex_u_axis) + face.texdef_shift[0]
+        t = vertex.dot(face.tex_v_axis) + face.texdef_shift[1]
+        return (s, t)
     
+    def _write_log_file(self, log_path: str, total_entities: int):
+        with open(log_path, 'w', encoding='utf-8') as f:
+            f.write("Quake 2 to UE5 T3D Conversion Log\n")
+            f.write(f"Generated: {datetime.now().isoformat()}\n")
+            f.write(f"Output: {self.output_path}\n")
+            f.write("=" * 70 + "\n\n")
+
+            f.write("Statistics:\n")
+            f.write(f"  Entities processed: {total_entities}\n")
+            f.write(f"  Brushes:       {self.stats['brushes']:6d}\n")
+            f.write(f"  Polygons:      {self.stats['polygons']:6d}\n")
+            f.write(f"  Triangles:     {self.stats['triangles']:6d}\n")
+            f.write(f"  PointLights:   {self.stats['lights']:6d}\n")
+            f.write(f"  Monsters:      {self.stats['monsters']:6d}\n")
+            f.write(f"  Triggers:      {self.stats['triggers']:6d}\n")
+            f.write(f"  Items/Ammo:    {self.stats['items']:6d}\n")
+            f.write(f"  PlayerStarts:  {self.stats['player_starts']:6d}\n")
+
+            if self.warnings:
+                f.write("\nWarnings:\n")
+                for warning in self.warnings:
+                    f.write(f"  - {warning}\n")
+
     def print_stats(self):
         print("\n" + "="*70)
         print("CONVERSION STATISTICS")
@@ -1119,39 +1258,61 @@ class T3DWriter:
         print(f"  Polygons:      {self.stats['polygons']:6d}")
         print(f"  Triangles:     {self.stats['triangles']:6d}")
         print(f"  PointLights:   {self.stats['lights']:6d}")
-        
+
         if self.stats['lights'] > 0:
             color_pct = (self.stats['lights_with_color'] / self.stats['lights']) * 100
             print(f"    with _color: {self.stats['lights_with_color']:6d} ({color_pct:.1f}%)")
-        
+
         print(f"  Monsters:      {self.stats['monsters']:6d}")
         print(f"  Triggers:      {self.stats['triggers']:6d}")
         print(f"  Items/Ammo:    {self.stats['items']:6d}")
         print(f"  PlayerStarts:  {self.stats['player_starts']:6d}")
         print("="*70)
-        
+
         self.triangulator.print_stats()
 
 
-def convert_map_to_t3d(map_filepath: str, t3d_filepath: str, grid_size: float = 2.54):
+def load_material_config(config_path: Optional[str]) -> Dict[str, str]:
+    if not config_path or not os.path.exists(config_path):
+        return {}
+
+    config: Dict[str, str] = {}
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    config[key.strip()] = value.strip()
+    except Exception as e:
+        logger.warning(f"Failed to load material config {config_path}: {e}")
+
+    return config
+
+
+def convert_map_to_t3d(map_filepath: str, t3d_filepath: str, grid_size: float = 2.54,
+                       material_config: Optional[Dict[str, str]] = None,
+                       log_path: Optional[str] = None):
     logger.info(f"╔{'═'*68}╗")
-    logger.info(f"║{'QUAKE 2 → UNREAL ENGINE 5 CONVERTER v2.2':^68}║")
+    logger.info(f"║{'QUAKE 2 → UNREAL ENGINE 5 CONVERTER v2.3':^68}║")
     logger.info(f"╚{'═'*68}╝")
     logger.info(f"")
     logger.info(f"Input:  {map_filepath}")
     logger.info(f"Output: {t3d_filepath}")
     logger.info(f"Grid:   {grid_size}cm snapping")
     logger.info(f"")
-    
+
     logger.info("Parsing MAP file...")
     parser = MAPParser(map_filepath)
     parser.parse()
-    
+
     total_brushes = sum(len(e.brushes) for e in parser.entities)
     total_lights = sum(1 for e in parser.entities if e.is_light())
     total_monsters = sum(1 for e in parser.entities if e.is_monster())
     total_triggers = sum(1 for e in parser.entities if e.is_trigger())
-    
+
     logger.info(f"Found:")
     logger.info(f"  • {len(parser.entities)} entities")
     logger.info(f"  • {total_brushes} brushes")
@@ -1159,15 +1320,18 @@ def convert_map_to_t3d(map_filepath: str, t3d_filepath: str, grid_size: float = 
     logger.info(f"  • {total_monsters} monsters")
     logger.info(f"  • {total_triggers} triggers")
     logger.info(f"")
-    
+
     logger.info("Writing T3D file...")
-    writer = T3DWriter(t3d_filepath, grid_size=grid_size)
+    writer = T3DWriter(t3d_filepath, grid_size=grid_size,
+                       material_config=material_config, log_path=log_path)
     writer.write(parser.entities)
-    
+
     writer.print_stats()
-    
+
     logger.info(f"\n✓ Conversion complete!")
     logger.info(f"✓ Output: {t3d_filepath}")
+    if log_path:
+        logger.info(f"✓ Log:    {log_path}")
 
 
 def print_banner():
@@ -1190,44 +1354,70 @@ def print_banner():
 
 def main():
     print_banner()
-    
-    if len(sys.argv) < 2:
-        print("Drag a .map file onto this script, or run:")
-        print(f"  python {sys.argv[0]} <input.map> [output.t3d] [grid_size]")
-        input("\nPress Enter to exit...")
-        sys.exit(1)
-    
-    input_file = sys.argv[1]
-    
+
+    parser = argparse.ArgumentParser(
+        description="Convert Quake 2 .map files to Unreal Engine 5 .t3d format",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python %(prog)s input.map
+  python %(prog)s input.map output.t3d
+  python %(prog)s input.map output.t3d --grid 1.27
+  python %(prog)s input.map output.t3d --materials materials.cfg
+        """
+    )
+    parser.add_argument("input", help="Path to the Quake 2 .map file")
+    parser.add_argument("output", nargs="?", default=None,
+                        help="Path to the output .t3d file (default: same name as input)")
+    parser.add_argument("--grid", type=float, default=2.54,
+                        help="Grid snap size in cm (default: 2.54)")
+    parser.add_argument("--materials", type=str, default=None,
+                        help="Path to a material mapping config file (key=value per line)")
+    parser.add_argument("--log", type=str, default=None,
+                        help="Path to write a conversion log file")
+    parser.add_argument("--no-pause", action="store_true",
+                        help="Do not pause for key press on exit")
+
+    args = parser.parse_args()
+
+    input_file = args.input
+    output_file = args.output if args.output else str(Path(input_file).with_suffix('.t3d'))
+    log_path = args.log if args.log else str(Path(output_file).with_suffix('.log'))
+
     if not os.path.exists(input_file):
         print(f"\n❌ ERROR: File not found: {input_file}")
-        input("\nPress Enter to exit...")
+        if not args.no_pause:
+            input("\nPress Enter to exit...")
         sys.exit(1)
-    
-    output_file = sys.argv[2] if len(sys.argv) >= 3 else str(Path(input_file).with_suffix('.t3d'))
-    grid_size = float(sys.argv[3]) if len(sys.argv) >= 4 else 2.54
-    
+
+    material_config = load_material_config(args.materials)
+
     try:
-        convert_map_to_t3d(input_file, output_file, grid_size)
-        
+        convert_map_to_t3d(input_file, output_file, args.grid,
+                           material_config=material_config, log_path=log_path)
+
         print(f"\n{'='*70}")
         print("✅ SUCCESS!")
         print(f"{'='*70}")
         print(f"\nOutput: {output_file}")
+        if material_config:
+            print(f"Materials config: {args.materials}")
         print(f"\nTo import into UE5:")
         print(f"  1. Open the .t3d file in a text editor")
         print(f"  2. Select all (Ctrl+A) and copy (Ctrl+C)")
         print(f"  3. Paste (Ctrl+V) into UE5 viewport")
         print(f"\n{'='*70}")
-        
-        input("\nPress Enter to exit...")
-        
+
+        if not args.no_pause:
+            input("\nPress Enter to exit...")
+
     except Exception as e:
         logger.error(f"\n❌ CONVERSION FAILED!")
         logger.error(f"Error: {e}")
         import traceback
         traceback.print_exc()
-        input("\nPress Enter to exit...")
+        if not args.no_pause:
+            input("\nPress Enter to exit...")
         sys.exit(1)
 
 

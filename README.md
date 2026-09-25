@@ -1,30 +1,34 @@
-# Quake II Map to FBX
+# Quake II Map to Unreal Engine 5
 
-Convert Quake II-style `.map` files into `.fbx` scenes for use in modern 3D tools and game engines.
+Convert Quake II-style `.map` files into Unreal Engine 5 `.t3d` scenes.
 
-This project exports brush-based map geometry and texture coordinates to FBX, making it easier to inspect or reuse classic level data in software such as Blender, Maya, or any other FBX-compatible tool.
+This project exports brush-based map geometry, texture coordinates, lights, and point entities to UE5 T3D format, making it easier to inspect or reuse classic level data in Unreal Engine 5.
+
+> A legacy FBX exporter (`map_to_fbx.py` + `id_map.py`) is still present but requires the Autodesk FBX SDK. The recommended path is `QUAKE2_MAP_2_T3D.py`.
 
 ## Features
 
+- Parse Quake II / QuakeEd4-compatible `.map` files
 - Export brush geometry as polygonal meshes
-- Export texture coordinates
-- Generate a complete FBX scene from a Quake II `.map` file
+- Generate per-polygon UV coordinates from Quake `texdef` data
+- Write `Texture=` material references using a configurable mapping file
+- Convert lights, player starts, monsters, triggers, items, and notes to UE5 actors
+- Organize actors into UE5 folders (`Quake2/Geometry`, `Quake2/Lights`, etc.)
+- Export a conversion log alongside the `.t3d` file
 
 ## Current Limitations
 
 - Internal or non-visible faces are not yet removed
-- Requires access to the original texture assets
+- Material mapping requires a user-supplied config file
 - Support may vary depending on map editor output and texture archive layout
 
 ## Requirements
 
-- Python
-- Autodesk FBX SDK and Python FBX SDK
-- Pillow 2.8.1 or newer
+- Python 3.8 or newer
+- Pillow 2.8.1 or newer (for the legacy FBX exporter)
 - A QuakeEd4-compatible `.map` file
-- Texture assets from the relevant game archive
 
-Supported editors may include:
+Supported editors include:
 
 - Embrace
 - QE4
@@ -34,29 +38,65 @@ Supported editors may include:
 ## Installation
 
 1. Install Python.
-2. Install Pillow:
+2. Install dependencies:
 
    ```bash
-   pip install pillow
+   pip install -r requirements.txt
    ```
 
-3. Install the Autodesk FBX SDK and Python bindings.
-4. Clone this repository:
+3. Clone this repository:
 
    ```bash
-   git clone https://github.com/AlleyKatPr0/q2_map_to_fbx.git
-   cd q2_map_to_fbx
+   git clone https://github.com/AlleyKatPr0/Quake2UE.git
+   cd Quake2UE
    ```
 
 ## Usage
 
-Run the converter with a source map file and output FBX path.
+Run the T3D converter with a source map file:
 
 ```bash
-python main.py input.map output.fbx
+python QUAKE2_MAP_2_T3D.py input.map
 ```
 
-> Update the command above if this repository uses a different script name or CLI entry point.
+Specify an output file and grid snap size:
+
+```bash
+python QUAKE2_MAP_2_T3D.py input.map output.t3d --grid 2.54
+```
+
+Use a material mapping config file to map Quake texture names to UE5 material paths:
+
+```bash
+python QUAKE2_MAP_2_T3D.py input.map output.t3d --materials materials.cfg
+```
+
+The config file is a simple key-value list:
+
+```text
+base_floor=/Game/Materials/BaseFloor
+base_wall=/Game/Materials/BaseWall
+```
+
+Disable the exit pause for scripted workflows:
+
+```bash
+python QUAKE2_MAP_2_T3D.py input.map output.t3d --no-pause
+```
+
+To import into UE5:
+
+1. Open the generated `.t3d` file in a text editor.
+2. Select all and copy.
+3. Paste into the UE5 viewport.
+
+## Testing
+
+Run the smoke tests with Python's built-in unittest runner:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Example Output
 
@@ -66,15 +106,16 @@ Example export: Prague North Quarter from *Vampire: The Masquerade – Redemptio
 
 ## How It Works
 
-This project was built using the Quake II QE4 source code as a reference for parsing map geometry and exporting mesh data correctly.
+`QUAKE2_MAP_2_T3D.py` parses map entities and brush planes, reconstructs brush vertices by intersecting planes, triangulates each face, and writes UE5 T3D actor definitions.
 
-FBX output is generated with the Autodesk Python FBX SDK.
+The legacy FBX path was built using the Quake II QE4 source code as a reference for parsing map geometry.
 
 ## Roadmap
 
 - Remove faces that are not visible from inside the playable space
 - Improve texture and material handling
 - Add better validation and error reporting
+- Support target/targetname relationships and func_group grouping
 
 ## Contributing
 

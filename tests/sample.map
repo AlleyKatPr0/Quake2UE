@@ -1,0 +1,24 @@
+// Simple Quake 2 test map
+{
+"classname" "worldspawn"
+"message" "Sample Map"
+{
+( -64 -64 -16 ) ( 64 -64 -16 ) ( -64 64 -16 ) base_floor 0 0 0 1 1
+( -64 -64 16 ) ( -64 64 16 ) ( 64 64 16 ) base_floor 0 0 0 1 1
+( -64 64 -16 ) ( 64 64 -16 ) ( 64 64 16 ) base_wall 0 0 0 1 1
+( 64 -64 -16 ) ( -64 -64 -16 ) ( -64 -64 16 ) base_wall 0 0 0 1 1
+( -64 -64 -16 ) ( -64 64 -16 ) ( -64 64 16 ) base_wall 0 0 0 1 1
+( 64 64 -16 ) ( 64 -64 -16 ) ( 64 -64 16 ) base_wall 0 0 0 1 1
+}
+}
+{
+"classname" "info_player_start"
+"origin" "0 0 32"
+"angle" "90"
+}
+{
+"classname" "light"
+"origin" "0 0 64"
+"light" "400"
+"_color" "1.0 0.8 0.6"
+}
