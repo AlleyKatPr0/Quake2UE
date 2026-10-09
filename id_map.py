@@ -90,8 +90,9 @@ class IdMath:
     @staticmethod
     def clip_winding(input_points, split, keep_on):
         # We cache off the sides the points exist in relation to the plane, there is a max number of points per poly.
-        dists = [0 for _ in range(IdMath.MAX_POINTS_ON_WINDING)]  # the distance from the plane to the point
-        sides = [0 for _ in range(IdMath.MAX_POINTS_ON_WINDING)]  # which side of the plane the point is on
+        num_points = input_points.numpoints
+        dists = [0] * (num_points + 1)  # the distance from the plane to the point
+        sides = [0] * (num_points + 1)  # which side of the plane the point is on
         counts = [0, 0, 0]
 
         # Id: determine sides for each point
@@ -261,22 +262,23 @@ class IdMath:
         return out_vecs
 
     @staticmethod
-    def emit_texture_coordinates(xyzst, texture, face):
+    def texture_coordinate_transform(face):
         vecs = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-
-        # get natural texture axis
         IdMath.texture_axis_from_plane(face.plane, vecs[0], vecs[1])
 
         td = face.texdef
-
         ang = td.rotate / 180.0 * IdMath.Q_PI
         sinv = math.sin(ang)
         cosv = math.cos(ang)
+        scale_s = td.scale[0] or 1
+        scale_t = td.scale[1] or 1
+        return (vecs, sinv, cosv, scale_s, scale_t, td.shift[0], td.shift[1])
 
-        if td.scale[0] == 0:
-            td.scale[0] = 1
-        if td.scale[1] == 0:
-            td.scale[1] = 1
+    @staticmethod
+    def emit_texture_coordinates(xyzst, texture, face, transform=None):
+        if transform is None:
+            transform = IdMath.texture_coordinate_transform(face)
+        vecs, sinv, cosv, scale_s, scale_t, shift_s, shift_t = transform
 
         s = IdMath.dot_product(xyzst, vecs[0])
         t = IdMath.dot_product(xyzst, vecs[1])
@@ -284,8 +286,8 @@ class IdMath:
         ns = cosv * s - sinv * t
         nt = sinv * s + cosv * t
 
-        s = ns / td.scale[0] + td.shift[0]
-        t = nt / td.scale[1] + td.shift[1]
+        s = ns / scale_s + shift_s
+        t = nt / scale_t + shift_t
 
         # gl scales everything from 0 to 1
         s /= texture.width
@@ -541,8 +543,12 @@ class Id2Map:
 
         def make_face_windings(self):
             """ creates the visible polygons on the faces """
+            clip_planes = [
+                (face, [-component for component in face.plane.normal], -face.plane.dist)
+                for face in self.faces
+            ]
             for face in self.faces:
-                face.winding = self.make_face_winding(face)
+                face.winding = self.make_face_winding(face, clip_planes)
                 if face.winding is None:
                     continue
 
@@ -557,14 +563,16 @@ class Id2Map:
 
                 # If the tex def and texture exist, we have enough information to generate their UV data
                 if face.texdef is not None and face.texture is not None:
+                    transform = IdMath.texture_coordinate_transform(face)
                     # setup s and t vectors, and set color
                     # TODO: I am not sure what this does... Even in the original QE4 code it seems pointless...
                     # out_vecs = IdMath.BeginTexturingFace(self, face)
 
                     for i in range(0, face.winding.numpoints):
-                        IdMath.emit_texture_coordinates(face.winding.points[i], face.texture, face)
+                        IdMath.emit_texture_coordinates(
+                            face.winding.points[i], face.texture, face, transform)
 
-        def make_face_winding(self, face):
+        def make_face_winding(self, face, clip_planes=None):
             """
             Creates the visible polygon for a single face
             The general run down is, we create an extremely large polygon on the surface
@@ -573,12 +581,17 @@ class Id2Map:
             """
             past = False
             plane = Id2Map.Plane()
+            if clip_planes is None:
+                clip_planes = [
+                    (clip, [-component for component in clip.plane.normal], -clip.plane.dist)
+                    for clip in self.faces
+                ]
 
             # get a poly that covers an effectively infinite area
             w = Id2Map.Winding.base_poly_for_plane(face.plane)
 
             # chop the poly by all of the other faces
-            for clip in self.faces:
+            for clip, flipped_normal, flipped_dist in clip_planes:
                 if clip == face:
                     past = True
                     continue
@@ -592,10 +605,10 @@ class Id2Map:
                         raise Exception('WARNING: Two same planes in same brush, brush is invalid...')
                     print('Same plane found in brush planes, this might be an error!')
                     continue
-
                 # flip the plane, because we want to keep the back side
-                IdMath.subtract(IdMath.vec3_zero, clip.plane.normal, plane.normal)
-                plane.dist = -clip.plane.dist
+                # flip the plane, because we want to keep the back side
+                plane.normal = flipped_normal
+                plane.dist = flipped_dist
 
                 w = IdMath.clip_winding(w, plane, False)
                 if w is None:

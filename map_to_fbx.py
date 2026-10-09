@@ -33,6 +33,8 @@ def add_entity_to_scene(scene, entity, brush_index):
 
         # accumulate all of the brush face points
         brush_points = []
+        point_indices = {}
+        face_point_count = 0
         for face in brush.faces:
             if face.winding is None:
                 # Not all faces work out, this is just some quake quirk or something
@@ -40,7 +42,11 @@ def add_entity_to_scene(scene, entity, brush_index):
 
             for i in range(0, face.winding.numpoints):
                 point = face.winding.points[i]
-                brush_points.append(fbx.FbxVector4(point[0], point[1], point[2]))
+                key = (point[0], point[1], point[2])
+                if key not in point_indices:
+                    point_indices[key] = len(brush_points)
+                    brush_points.append(fbx.FbxVector4(*key))
+                face_point_count += 1
 
         # init the control points we are going to set
         new_mesh.InitControlPoints(len(brush_points))
@@ -51,7 +57,7 @@ def add_entity_to_scene(scene, entity, brush_index):
 
         # now join all the points
         cur_poly = 0
-        cur_point = 0
+        plotted_points = 0
         for face in brush.faces:
             if face.winding is None:
                 # Not all faces work out, this is just some quake quirk or something
@@ -60,14 +66,15 @@ def add_entity_to_scene(scene, entity, brush_index):
             new_mesh.BeginPolygon(cur_poly)
 
             for i in range(0, face.winding.numpoints):
-                new_mesh.AddPolygon(cur_point)
-                cur_point += 1
+                point = face.winding.points[i]
+                new_mesh.AddPolygon(point_indices[(point[0], point[1], point[2])])
+                plotted_points += 1
 
             new_mesh.EndPolygon()
             cur_poly += 1
 
-        if cur_point != len(brush_points):
-            raise Exception('Number of points plotted on polygons not the number of actual polys!')
+        if plotted_points != face_point_count:
+            raise Exception('Number of points plotted on polygons not the number of face points!')
 
         brush_index += 1
 
@@ -131,6 +138,8 @@ def main():
                           help='The textures folder (optional)')
     arg_parser.add_option('-v', '--verbose', action='store_true', dest='verbose', default=False,
                           help='Spews information about the process (takes more time)')
+    arg_parser.add_option('-b', '--binary', action='store_true', dest='binary', default=False,
+                          help='Write binary FBX instead of the default ASCII format')
 
     (options, args) = arg_parser.parse_args()
 
@@ -161,7 +170,7 @@ def main():
         brush_index_in += add_entity_to_scene(g_fbx_scene, entity_in, brush_index_in)
 
     # Save the scene.
-    save_scene(options.output, g_fbx_manager, g_fbx_scene, True)
+    save_scene(options.output, g_fbx_manager, g_fbx_scene, not options.binary)
     #
     # Destroy the fbx manager explicitly, which recursively destroys
     # all the objects that have been created with it.

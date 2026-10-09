@@ -759,6 +759,7 @@ class PolygonTriangulator:
             return vertices
         
         cleaned = []
+        duplicate_cells = {}
         
         for i in range(len(vertices)):
             prev_idx = (i - 1 + len(vertices)) % len(vertices)
@@ -769,10 +770,28 @@ class PolygonTriangulator:
             next_v = vertices[next_idx]
             
             is_duplicate = False
-            for v in cleaned:
-                if self._vec_equal(curr, v):
-                    is_duplicate = True
-                    break
+            if self.epsilon > 0:
+                cell = (math.floor(curr.x / self.epsilon),
+                        math.floor(curr.y / self.epsilon),
+                        math.floor(curr.z / self.epsilon))
+                for x in range(cell[0] - 1, cell[0] + 2):
+                    for y in range(cell[1] - 1, cell[1] + 2):
+                        for z in range(cell[2] - 1, cell[2] + 2):
+                            for existing in duplicate_cells.get((x, y, z), ()):
+                                if self._vec_equal(curr, existing):
+                                    is_duplicate = True
+                                    break
+                            if is_duplicate:
+                                break
+                        if is_duplicate:
+                            break
+                    if is_duplicate:
+                        break
+            else:
+                for v in cleaned:
+                    if self._vec_equal(curr, v):
+                        is_duplicate = True
+                        break
             
             if is_duplicate:
                 continue
@@ -785,6 +804,8 @@ class PolygonTriangulator:
                 continue
             
             cleaned.append(curr)
+            if self.epsilon > 0:
+                duplicate_cells.setdefault(cell, []).append(curr)
         
         return cleaned
     
@@ -1194,8 +1215,7 @@ class T3DWriter:
         unreal_verts = [v.to_unreal(grid_snap=self.grid_size) for v in vertices]
 
         # Validate all vertices are valid
-        valid_verts = [v for v in unreal_verts if v.is_valid()]
-        if len(valid_verts) < 3:
+        if sum(vertex.is_valid() for vertex in unreal_verts) < 3:
             logger.warning(f"Skipping polygon with invalid vertices")
             self.warnings.append("Skipping polygon with invalid vertices")
             return
