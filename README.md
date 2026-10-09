@@ -5,6 +5,7 @@ Convert Quake II-style `.map` files into Unreal Engine 5 `.t3d` scenes.
 This project exports brush-based map geometry, texture coordinates, lights, and point entities to UE5 T3D format, making it easier to inspect or reuse classic level data in Unreal Engine 5.
 
 > A legacy FBX exporter (`map_to_fbx.py` + `id_map.py`) is still present but requires the Autodesk FBX SDK. The recommended path is `QUAKE2_MAP_2_T3D.py`.
+> The legacy exporter writes ASCII FBX by default; pass `--binary` to write binary FBX instead.
 
 ## Features
 
