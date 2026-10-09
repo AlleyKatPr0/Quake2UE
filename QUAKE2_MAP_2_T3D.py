@@ -258,6 +258,7 @@ class Brush:
     
     def calculate_vertices(self, epsilon=0.1) -> List[Vector3]:
         vertices = []
+        duplicate_cells = {}
 
         if len(self.faces) < 4:
             return vertices
@@ -285,15 +286,37 @@ class Brush:
                         continue
 
                     is_duplicate = False
-                    for existing in vertices:
-                        if (abs(vertex.x - existing.x) < epsilon and
-                            abs(vertex.y - existing.y) < epsilon and
-                            abs(vertex.z - existing.z) < epsilon):
-                            is_duplicate = True
-                            break
+                    if epsilon > 0:
+                        cell = (math.floor(vertex.x / epsilon),
+                                math.floor(vertex.y / epsilon),
+                                math.floor(vertex.z / epsilon))
+                        for x in range(cell[0] - 1, cell[0] + 2):
+                            for y in range(cell[1] - 1, cell[1] + 2):
+                                for z in range(cell[2] - 1, cell[2] + 2):
+                                    for existing in duplicate_cells.get((x, y, z), ()):
+                                        if (abs(vertex.x - existing.x) < epsilon and
+                                            abs(vertex.y - existing.y) < epsilon and
+                                            abs(vertex.z - existing.z) < epsilon):
+                                            is_duplicate = True
+                                            break
+                                    if is_duplicate:
+                                        break
+                                if is_duplicate:
+                                    break
+                            if is_duplicate:
+                                break
+                    else:
+                        for existing in vertices:
+                            if (abs(vertex.x - existing.x) < epsilon and
+                                abs(vertex.y - existing.y) < epsilon and
+                                abs(vertex.z - existing.z) < epsilon):
+                                is_duplicate = True
+                                break
 
                     if not is_duplicate:
                         vertices.append(vertex)
+                        if epsilon > 0:
+                            duplicate_cells.setdefault(cell, []).append(vertex)
 
         return vertices
     
@@ -455,19 +478,17 @@ class MAPParser:
             raise FileNotFoundError(f"MAP file not found: {self.filepath}")
         
         with open(self.filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        
-        content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)
-        self._parse_entities(content)
+            self._parse_entities(f)
     
-    def _parse_entities(self, content: str):
+    def _parse_entities(self, content):
         entity_depth = 0
         brush_depth = 0
         current_entity = None
         current_brush = None
         
-        for line in content.split('\n'):
-            line = line.strip()
+        lines = content.splitlines() if isinstance(content, str) else content
+        for line in lines:
+            line = line.split('//', 1)[0].strip()
             if not line:
                 continue
             
@@ -585,7 +606,9 @@ class PolygonTriangulator:
     
     def _ear_clipping(self, vertices: List[Vector3], normal: Vector3, max_iterations: int = 1000) -> List[List[Vector3]]:
         triangles = []
-        remaining = list(vertices)
+        remaining = list(range(len(vertices)))
+        u_axis, v_axis = self._projection_axes(normal)
+        projected = [(vertex.dot(u_axis), vertex.dot(v_axis)) for vertex in vertices]
         iterations = 0
         
         while len(remaining) > 3 and iterations < max_iterations:
@@ -596,11 +619,16 @@ class PolygonTriangulator:
                 prev_idx = (i - 1 + len(remaining)) % len(remaining)
                 next_idx = (i + 1) % len(remaining)
                 
-                prev = remaining[prev_idx]
-                curr = remaining[i]
-                next_v = remaining[next_idx]
+                prev_index = remaining[prev_idx]
+                curr_index = remaining[i]
+                next_index = remaining[next_idx]
+                prev = vertices[prev_index]
+                curr = vertices[curr_index]
+                next_v = vertices[next_index]
                 
-                if self._is_ear(prev, curr, next_v, remaining, normal):
+                if self._is_ear_projected(
+                        prev_index, curr_index, next_index, remaining,
+                        vertices, projected, normal):
                     triangles.append([prev, curr, next_v])
                     remaining.pop(i)
                     ear_found = True
@@ -610,11 +638,30 @@ class PolygonTriangulator:
                 return []
         
         if len(remaining) == 3:
-            triangles.append(remaining)
+            triangles.append([vertices[index] for index in remaining])
         elif len(remaining) > 3:
             return []
         
         return triangles
+
+    def _is_ear_projected(self, prev_index: int, curr_index: int, next_index: int,
+                          polygon: List[int], vertices: List[Vector3],
+                          projected: List[Tuple[float, float]], normal: Vector3) -> bool:
+        prev, curr, next_v = vertices[prev_index], vertices[curr_index], vertices[next_index]
+        cross = (curr - prev).cross(next_v - curr)
+        dot = cross.dot(normal)
+
+        if dot < -self.epsilon or abs(dot) < self.epsilon:
+            return False
+
+        for index in polygon:
+            if index in (prev_index, curr_index, next_index):
+                continue
+            if self._point_in_triangle_projected(
+                    projected[index], projected[prev_index],
+                    projected[curr_index], projected[next_index]):
+                return False
+        return True
     
     def _is_ear(self, prev: Vector3, curr: Vector3, next_v: Vector3, 
                 polygon: List[Vector3], normal: Vector3) -> bool:
@@ -641,6 +688,14 @@ class PolygonTriangulator:
     
     def _point_in_triangle(self, point: Vector3, a: Vector3, b: Vector3, 
                            c: Vector3, normal: Vector3) -> bool:
+        u_axis, v_axis = self._projection_axes(normal)
+        return self._point_in_triangle_projected(
+            (point.dot(u_axis), point.dot(v_axis)),
+            (a.dot(u_axis), a.dot(v_axis)),
+            (b.dot(u_axis), b.dot(v_axis)),
+            (c.dot(u_axis), c.dot(v_axis)))
+
+    def _projection_axes(self, normal: Vector3) -> Tuple[Vector3, Vector3]:
         if abs(normal.z) > 0.9:
             u_axis = Vector3(1, 0, 0)
         else:
@@ -649,21 +704,18 @@ class PolygonTriangulator:
         u_axis = u_axis - (normal * u_axis.dot(normal))
         u_axis = u_axis.normalize()
         v_axis = normal.cross(u_axis).normalize()
-        
-        def project_2d(v):
-            return (v.dot(u_axis), v.dot(v_axis))
-        
-        p = project_2d(point)
-        a2d = project_2d(a)
-        b2d = project_2d(b)
-        c2d = project_2d(c)
-        
-        v0x = c2d[0] - a2d[0]
-        v0y = c2d[1] - a2d[1]
-        v1x = b2d[0] - a2d[0]
-        v1y = b2d[1] - a2d[1]
-        v2x = p[0] - a2d[0]
-        v2y = p[1] - a2d[1]
+
+        return u_axis, v_axis
+
+    def _point_in_triangle_projected(self, point: Tuple[float, float],
+                                     a: Tuple[float, float], b: Tuple[float, float],
+                                     c: Tuple[float, float]) -> bool:
+        v0x = c[0] - a[0]
+        v0y = c[1] - a[1]
+        v1x = b[0] - a[0]
+        v1y = b[1] - a[1]
+        v2x = point[0] - a[0]
+        v2y = point[1] - a[1]
         
         dot00 = v0x * v0x + v0y * v0y
         dot01 = v0x * v1x + v0y * v1y
